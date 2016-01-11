@@ -1,4 +1,5 @@
 from argparse import ArgumentParser
+import sys
 from sys import stdin
 import logging
 from ConfigParser import ConfigParser
@@ -19,15 +20,17 @@ def parse_args():
 
 
 def read_config():
-    args = parse_args()
+    #args = parse_args()
     conf = ConfigParser()
-    conf.read(args.conf)
+    #conf.read(args.conf)
+    conf.read(sys.argv[1])
     return conf
 
 
 def main():
     conf = read_config()
     logging.basicConfig(
+        # level=logging.DEBUG,
         level=logging.INFO,
         format="%(asctime)s : " +
         "%(module)s (%(lineno)s) - %(levelname)s - %(message)s")

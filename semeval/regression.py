@@ -1,3 +1,5 @@
+import sys
+
 from numpy import linalg, array
 from itertools import product
 from sklearn import linear_model
@@ -23,10 +25,13 @@ class Featurizer(object):
     def featurize(self, stream):
         sample = []
         pairs = self.reader.read_sentences(stream)
-        for s1, s2 in pairs:
+        for c, (s1, s2) in enumerate(pairs):
+            if c % 100:
+                sys.stderr.write("{0}...".format(c))
             pair = SentencePair(s1, s2)
             self.aligner.align(pair)
             sample.append(pair)
+        sys.stderr.write("{0}...\n".format(c))
         return sample
 
 class RegressionModel:
@@ -59,18 +64,18 @@ class RegressionModel:
                 threshold=self.feat_select_thr)
             self.selector = self.selector.fit(
                 self.preprocessed_data, self.train_labels)
-            self.preprocessed_data = self.selector.transform(self.train_data) 
+            self.preprocessed_data = self.selector.transform(self.train_data)
             self.get_selected_feats(self.selector.get_support(indices=True))
 
     def preproc_and_train(self):
         self.preprocessed_data = self.train_data
         self.preproc_train()
         self.train(self.preprocessed_data)
-    
+
     def train(self, data):
         if self.model_name == 'linalg_lstsq':
             self.model = linalg.lstsq(data, self.train_labels)[0]
-        else:    
+        else:
             if self.model_name == 'sklearn_linear':
                 self.model = linear_model.LinearRegression()
             if self.model_name == 'sklearn_ridge':
@@ -87,7 +92,7 @@ class RegressionModel:
                 self.model = svm.SVR(kernel=self.kernel,
                                      degree=int(self.degree), coef0=1)
             self.model.fit(data, self.train_labels)
-    
+
     def preproc_test(self, data):
         if self.feat_select_thr != None:
             return self.selector.transform(data)
@@ -123,7 +128,7 @@ class Regression(object):
          if self.experiment == 'true':
              self.experiment_options = [literal_eval(i[1]) for i
                                         in conf.items('experiment')]
-         
+
     def set_attribute(self, name, value):
         if name == 'train':
             self.train_fn = value
@@ -138,7 +143,7 @@ class Regression(object):
         if name == 'load_model':
             self.load_model = value
         if name == 'load_model_fn':
-            self.load_model_fn = value 
+            self.load_model_fn = value
         if name == 'dump_model':
             self.dump_model = value
         if name == 'dump_model_fn':
@@ -155,7 +160,7 @@ class Regression(object):
             self.kernel = value
         if name == 'degree':
             self.degree = value
-        if name == 'experiment': 
+        if name == 'experiment':
             self.experiment = value
 
 
@@ -167,8 +172,10 @@ class Regression(object):
 
     def regression(self):
         # feature or load model and use its data
+        #TODO
+        self.test_fn, self.outfile_fn, self.gold_labels_fn = sys.argv[2:5]
         self.get_training_setup()
-        
+
         if self.experiment == 'true':
             for exp_param in product(*self.experiment_options):
                 logging.info('experimenting with option {}'.format(repr(exp_param)))
@@ -177,12 +184,12 @@ class Regression(object):
         else:
             # pass training parameters, train and evaluate the model
             self.regression_item()
-        
+
         if self.dump_model == 'true':
             logging.info('dumping featurized data...')
             with open(self.dump_model_fn, 'w') as f:
                 cPickle.dump(self.regression_model, f)
-            
+
     def regression_item(self, dump_predicted_labels=True):
         self.pass_regression_params()
         logging.info('training model...')
@@ -191,7 +198,9 @@ class Regression(object):
         predicted = self.regression_model.preproc_and_predict(
             self.regression_model.test_data)
         with open(self.gold_labels_fn) as f:
-                self.gold_labels = self.read_labels(f)
+            sys.stderr.write("reading gold from {0}\n".format(
+                self.gold_labels_fn))
+            self.gold_labels = self.read_labels(f)
         logging.info('correlation on test data:{0}'.format(
             repr(pearsonr(predicted, self.gold_labels))))
         if dump_predicted_labels:
@@ -211,19 +220,23 @@ class Regression(object):
 
             logging.info('featurizing train...')
             with open(self.train_fn) as f:
+                sys.stderr.write("reading train from {0}\n".format(
+                    self.train_fn))
                 train = self.featurizer.featurize(f)
             with open(self.train_labels_fn) as f:
                 self.train_labels = self.read_labels(f)
             self.featurizer.reader.clear_pairs()
             logging.info('featurizing test...')
             with open(self.test_fn) as f:
+                sys.stderr.write("reading test from {0}\n".format(
+                    self.test_fn))
                 test = self.featurizer.featurize(f)
-            logging.info('converting...')    
+            logging.info('converting...')
             train_feats = self.convert_to_table(train)
             test_feats = self.convert_to_table(test)
             self.regression_model = RegressionModel(
                 self.model_name, train_feats, self.train_labels, test_feats)
-    
+
     def pass_regression_params(self):
             self.regression_model.model_name = self.model_name
             self.regression_model.conf = self.conf

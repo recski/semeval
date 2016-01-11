@@ -2,6 +2,7 @@
 
 for file in $1/STS.input.*
 do
-    n=`basename $file`
-    cat $file | iconv -f UTF8 -t LATIN1//TRANSLIT | nice -n1 python semeval/paraphrases.py -c $3 > $2/$n.out 2> $2/$n.log &
+    n=`basename $file | cut -d'.' -f3`
+    echo $n
+    nice python semeval/paraphrases.py $3 $file $2/STS.output.$n.txt $1/STS.gs.$n.txt 2> $2/$n.log
 done
