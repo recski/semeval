@@ -77,8 +77,8 @@ class RegressionModel:
                         break
                 if needed:
                     to_filter_names.append(f)
-        supported = [i for i in i2f if i2f[i] in to_filter_names]            
-        return data[:, sorted(supported)]           
+        supported = [i for i in i2f if i2f[i] in to_filter_names]
+        return data[:, sorted(supported)]
 
     def preproc_and_train(self, train, train_labels):
         self.manual_select = ['collins', 'wikti', 'twitter']
@@ -86,7 +86,7 @@ class RegressionModel:
         if self.manual_select != []:
             train = self.manual_selection(train)
         self.train(train, train_labels)
-    
+
     def train(self, data, train_labels):
             if self.model_name == 'sklearn_linear':
                 model = linear_model.LinearRegression()
@@ -103,18 +103,18 @@ class RegressionModel:
             if self.model_name == 'sklearn_svr':
                 model = svm.SVR(kernel=self.kernel,
                                      degree=int(self.degree), coef0=1)
-            selection = SelectKBest(k=self.select_top)    
+            selection = SelectKBest(k=self.select_top)
             variance = VarianceThreshold(threshold=self.feat_select_thr)
             print data.shape
-            self.pipeline = Pipeline(steps=[('univ_select', SelectKBest(k=65, score_func=f_regression)), ('variance', VarianceThreshold(threshold=0.00)), ('model', svm.SVR(C=100, cache_size=200, coef0=0.0, epsilon=0.5, gamma=0.1, kernel='rbf', max_iter=-1, shrinking=True, tol=0.001, verbose=False))])
+            self.pipeline = Pipeline(steps=[('univ_select', SelectKBest(k=10, score_func=f_regression)), ('variance', VarianceThreshold(threshold=0.00)), ('model', svm.SVR(C=100, cache_size=200, coef0=0.0, epsilon=0.5, gamma=0.1, kernel='rbf', max_iter=-1, shrinking=True, tol=0.001, verbose=False))])
 
 
             self.pipeline.fit(data, train_labels)
-    
+
     def preproc_and_predict(self, data):
         if self.manual_select != []:
             data = self.manual_selection(data)
-        print data.shape    
+        print data.shape
         return self.pipeline.predict(data)
 
 class Trainer(object):
@@ -134,7 +134,7 @@ class Trainer(object):
         self.train_labels_fn=train_labels_fn
         self.conf=conf
         self.load_feats = load_feats
-    
+
     def get_train_data(self):
         self.train_labels = array([float(l.strip()) for l in open(self.train_labels_fn)])
         if self.load_feats == True:
@@ -163,7 +163,7 @@ class Trainer(object):
         fn = self.model
         fh = open(fn, 'w')
         cPickle.dump(self.regression_model, fh)
- 
+
 class Tagger(object):
 
     def __init__(self, load_feats=True, input_=None, model='model',
@@ -180,7 +180,7 @@ class Tagger(object):
         else:
             self.gold_fns = ['' for i in range(len(self.input_fns))]
         self.conf = conf
-    
+
     def get_inputs(self):
         if self.load_feats:
             return [cPickle.load(open(f))['data'] for f in self.input_fns]
@@ -194,7 +194,7 @@ class Tagger(object):
                 sample = a.featurize(fh)
                 logging.info('Converting table...')
                 l.append(a.convert_to_table(sample))
-            return l    
+            return l
 
     def tag(self):
         self.regression_model = cPickle.load(open(self.model))
@@ -202,7 +202,7 @@ class Tagger(object):
         for i, ip in enumerate(self.inputs):
             self.predict_and_eval(
                 ip, self.output_fns[i], self.gold_fns[i] )
-    
+
     def predict_and_eval(self, ip, op, gold):
 
         logging.info('predicting ...'.format(op))
@@ -210,10 +210,10 @@ class Tagger(object):
         if op != '':
             with open(op, 'w') as f:
                 f.write('\n'.join(str(i) for i in predicted) + '\n')
-        if gold != None:        
-            with open(gold) as f:    
+        if gold != '':
+            with open(gold) as f:
                 gold_labels = [float(l.strip()) for l in f]
-            
+
             logging.info('correlation with {0}:{1}'.format(
                 gold, repr(pearsonr(list(predicted), gold_labels))))
 
@@ -235,7 +235,7 @@ def tag(args):
     a = Tagger(load_feats=args.load_feats,
               input_=args.inputs, model=args.model,
               outputs=args.outputs, gold=args.gold, conf=conf)
-    a.tag() 
+    a.tag()
 
 def main():
     args = parse_args()
