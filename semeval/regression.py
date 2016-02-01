@@ -1,54 +1,61 @@
-import sys
-
-from numpy import linalg, array
-from itertools import product
 from sklearn import linear_model
 from sklearn import kernel_ridge
 from sklearn import svm
-from sklearn.feature_selection import VarianceThreshold
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_regression
+from sklearn.pipeline import Pipeline
 from scipy.stats import pearsonr
-from ast import literal_eval
-
-from sentence import SentencePair
+from argparse import ArgumentParser
+from ConfigParser import ConfigParser
 import logging
 import cPickle
-from read_and_enrich import ReadAndEnrich
-from align_and_penalize import AlignAndPenalize
+from featurizer import Featurizer
+from numpy import array
 
-class Featurizer(object):
 
-    def __init__(self, conf, reader, aligner):
-        self.reader = reader
-        self.aligner = aligner
-        self.conf = conf
+def parse_args():
+    p = ArgumentParser()
+    p.add_argument(
+        '-c', '--conf', help='config file', default='None', type=str)
+    p.add_argument(
+                '-inputs','--inputs', help=
+        'input list, for tagging it can be multiple, separated by ,', type=str)
+    p.add_argument(
+        '-outputs' ,'--outputs', help=
+        'output list for tagging separated by ,', type=str, default=None)
+    p.add_argument(
+        '-gold' ,'--gold', help=
+        'gold list for training/tagging separated by ,', type=str, default=None)
+    p.add_argument(
+        '-model', help='--model', type=str)
+    p.add_argument(
+        '-train', help='--train', action='store_true', default=False)
+    p.add_argument(
+        '-tag', help='--tag', action='store_true', default=False)
+    p.add_argument(
+        '-load_feats', help='--load_feats', action='store_true', default=False)
 
-    def featurize(self, stream):
-        sample = []
-        pairs = self.reader.read_sentences(stream)
-        for c, (s1, s2) in enumerate(pairs):
-            if c % 100:
-                sys.stderr.write("{0}...".format(c))
-            pair = SentencePair(s1, s2)
-            self.aligner.align(pair)
-            sample.append(pair)
-        sys.stderr.write("{0}...\n".format(c))
-        return sample
+    return p.parse_args()
+
+
+def read_config(args):
+    conf = ConfigParser()
+    conf.read(args.conf)
+    return conf
 
 class RegressionModel:
 
-    def __init__(self, model_name, train_data, train_labels,
-                 test_data, feat_select_thr=0.0, feats={}, kernel='poly',
-                 degree=2):
+    def __init__(self, model_name, feat_select_thr=0.0,
+                 kernel='poly',
+                 degree=2, feats={}, feat_select=True, select_top=50):
          self.model_name = model_name
-         self.train_data = train_data
-         self.train_labels = train_labels
-         self.test_data = test_data
-         self.feat_select_thr = feat_select_thr
+         self.feat_select_thr = float(feat_select_thr)
          self.feats = feats
          self.kernel = kernel
          self.degree = degree
          self.selector=None
          self.selected_feats = None
+         self.manual_select = []
+         self.select_top = select_top
 
     def get_selected_feats(self, support):
         self.selected_feats = {}
@@ -58,222 +65,191 @@ class RegressionModel:
                 feat = reversed_feats[old]
                 self.selected_feats[feat] = new
 
-    def preproc_train(self):
-        if self.feat_select_thr != None:
-            self.selector = VarianceThreshold(
-                threshold=self.feat_select_thr)
-            self.selector = self.selector.fit(
-                self.preprocessed_data, self.train_labels)
-            self.preprocessed_data = self.selector.transform(self.train_data)
-            self.get_selected_feats(self.selector.get_support(indices=True))
+    def manual_selection(self, data):
+        i2f = dict([(v, k) for k, v in self.feats.iteritems()])
+        if self.manual_select != []:
+            to_filter_names = []
+            for f in self.feats:
+                needed = True
+                for m in self.manual_select:
+                    if m in f:
+                        needed = False
+                        break
+                if needed:
+                    to_filter_names.append(f)
+        supported = [i for i in i2f if i2f[i] in to_filter_names]            
+        return data[:, sorted(supported)]           
 
-    def preproc_and_train(self):
-        self.preprocessed_data = self.train_data
-        self.preproc_train()
-        self.train(self.preprocessed_data)
-
-    def train(self, data):
-        if self.model_name == 'linalg_lstsq':
-            self.model = linalg.lstsq(data, self.train_labels)[0]
-        else:
+    def preproc_and_train(self, train, train_labels):
+        self.manual_select = ['collins', 'wikti', 'twitter']
+        self.manual_select = []
+        if self.manual_select != []:
+            train = self.manual_selection(train)
+        self.train(train, train_labels)
+    
+    def train(self, data, train_labels):
             if self.model_name == 'sklearn_linear':
-                self.model = linear_model.LinearRegression()
+                model = linear_model.LinearRegression()
             if self.model_name == 'sklearn_ridge':
-                self.model = linear_model.Ridge()
+                model = linear_model.Ridge()
             if self.model_name == 'sklearn_lasso':
-                self.model = linear_model.Lasso(alpha=0.001)
+                model = linear_model.Lasso(alpha=0.001)
             if self.model_name == 'sklearn_elastic_net':
-                self.model = linear_model.ElasticNet(alpha=0.001)
+                model = linear_model.ElasticNet(alpha=0.001)
             if self.model_name == 'sklearn_kernel_ridge':
-                self.model = kernel_ridge.KernelRidge(
+                model = kernel_ridge.KernelRidge(
                 alpha=2, kernel=self.kernel, gamma=None,
                 degree=int(self.degree), coef0=1, kernel_params=None)
             if self.model_name == 'sklearn_svr':
-                self.model = svm.SVR(kernel=self.kernel,
+                model = svm.SVR(kernel=self.kernel,
                                      degree=int(self.degree), coef0=1)
-            self.model.fit(data, self.train_labels)
+            selection = SelectKBest(k=self.select_top)    
+            variance = VarianceThreshold(threshold=self.feat_select_thr)
+            print data.shape
+            self.pipeline = Pipeline(steps=[('univ_select', SelectKBest(k=65, score_func=f_regression)), ('variance', VarianceThreshold(threshold=0.00)), ('model', svm.SVR(C=100, cache_size=200, coef0=0.0, epsilon=0.5, gamma=0.1, kernel='rbf', max_iter=-1, shrinking=True, tol=0.001, verbose=False))])
 
-    def preproc_test(self, data):
-        if self.feat_select_thr != None:
-            return self.selector.transform(data)
-        else:
-            return data
 
+            self.pipeline.fit(data, train_labels)
+    
     def preproc_and_predict(self, data):
-        preprocessed_data = self.preproc_test(data)
-        return self.predict(preprocessed_data)
+        if self.manual_select != []:
+            data = self.manual_selection(data)
+        print data.shape    
+        return self.pipeline.predict(data)
 
-    def predict(self, data):
-        if self.model_name == 'linalg_lstsq':
-            return self.predict_regression(data)
-        if self.model_name[:7] == 'sklearn':
-            return self.model.predict(data)
+class Trainer(object):
 
-    def predict_regression(self, feats, true_th=0.5):
-        scores = []
-        for sample in feats:
-            ans = sum(self.model[i] * x for i, x in enumerate(sample))
-            scores.append(ans)
-        return scores
-
-
-class Regression(object):
-
-    def __init__(self, conf):
-         self.conf = conf
-         self._feat_order = {}
-         self._feat_i = 0
-         for item in conf.items('ml') + conf.items('regression'):
-             self.set_attribute(item[0], item[1])
-         if self.experiment == 'true':
-             self.experiment_options = [literal_eval(i[1]) for i
-                                        in conf.items('experiment')]
-
-    def set_attribute(self, name, value):
-        if name == 'train':
-            self.train_fn = value
-        if name == 'train_labels':
-            self.train_labels_fn = value
-        if name == 'test':
-            self.test_fn = value
-        if name == 'gold':
-            self.gold_labels_fn = value
-        if name == 'model_name':
-            self.model_name = value
-        if name == 'load_model':
-            self.load_model = value
-        if name == 'load_model_fn':
-            self.load_model_fn = value
-        if name == 'dump_model':
-            self.dump_model = value
-        if name == 'dump_model_fn':
-            self.dump_model_fn = value
-        if name == 'feat_select':
-            self.feat_select = value
-        if name == 'feat_select_thr':
-            self.feat_select_thr = value
-        if name == 'binary_labels':
-            self.binary_labels = value
-        if name == 'outfile':
-            self.outfile_fn = value
-        if name == 'kernel':
-            self.kernel = value
-        if name == 'degree':
-            self.degree = value
-        if name == 'experiment':
-            self.experiment = value
-
-
-    def set_exp_params(self, list_):
-        for d in list_:
-            for k in d:
-                v = d[k]
-                self.set_attribute(k, v)
-
-    def regression(self):
-        # feature or load model and use its data
-        #TODO
-        self.test_fn, self.outfile_fn, self.gold_labels_fn = sys.argv[2:5]
-        self.get_training_setup()
-
-        if self.experiment == 'true':
-            for exp_param in product(*self.experiment_options):
-                logging.info('experimenting with option {}'.format(repr(exp_param)))
-                self.set_exp_params(exp_param)
-                self.regression_item(dump_predicted_labels=False)
+    def __init__(self, conf,
+                 load_feats=False, input_=None, train_labels_fn=None,
+                 model='model', model_name='sklearn_svr', feat_select=True,
+                 feat_select_thr=0.02, degree=3, kernel='poly', C=100):
+        self.model = model
+        self.model_name = model_name
+        self.feat_select = feat_select
+        self.feat_select_thr = feat_select_thr
+        self.degree = degree
+        self.kernel = kernel
+        self.C = C
+        self.input_=input_
+        self.train_labels_fn=train_labels_fn
+        self.conf=conf
+        self.load_feats = load_feats
+    
+    def get_train_data(self):
+        self.train_labels = array([float(l.strip()) for l in open(self.train_labels_fn)])
+        if self.load_feats == True:
+            self.train_data = cPickle.load(open(self.input_))['data']
+            self.feats = cPickle.load(open(self.input_))['feats']
         else:
-            # pass training parameters, train and evaluate the model
-            self.regression_item()
-
-        if self.dump_model == 'true':
-            logging.info('dumping featurized data...')
-            with open(self.dump_model_fn, 'w') as f:
-                cPickle.dump(self.regression_model, f)
-
-    def regression_item(self, dump_predicted_labels=True):
-        self.pass_regression_params()
-        logging.info('training model...')
-        self.regression_model.preproc_and_train()
-        logging.info('predicting...')
-        predicted = self.regression_model.preproc_and_predict(
-            self.regression_model.test_data)
-        with open(self.gold_labels_fn) as f:
-            sys.stderr.write("reading gold from {0}\n".format(
-                self.gold_labels_fn))
-            self.gold_labels = self.read_labels(f)
-        logging.info('correlation on test data:{0}'.format(
-            repr(pearsonr(predicted, self.gold_labels))))
-        if dump_predicted_labels:
-            with open(self.outfile_fn, 'w') as f:
-                f.write('\n'.join(str(i) for i in predicted) + '\n')
-
-    def get_training_setup(self):
-
-        if self.load_model == 'true':
-            logging.info('loading featurized data...')
-            self.regression_model = cPickle.load(open(self.load_model_fn))
-
-        else:
-            reader = ReadAndEnrich(self.conf)
-            aligner = AlignAndPenalize(self.conf)
-            self.featurizer = Featurizer(self.conf, reader, aligner)
-
+            a = Featurizer(self.conf)
+            fh = open(self.input_)
             logging.info('featurizing train...')
-            with open(self.train_fn) as f:
-                sys.stderr.write("reading train from {0}\n".format(
-                    self.train_fn))
-                train = self.featurizer.featurize(f)
-            with open(self.train_labels_fn) as f:
-                self.train_labels = self.read_labels(f)
-            self.featurizer.reader.clear_pairs()
-            logging.info('featurizing test...')
-            with open(self.test_fn) as f:
-                sys.stderr.write("reading test from {0}\n".format(
-                    self.test_fn))
-                test = self.featurizer.featurize(f)
-            logging.info('converting...')
-            train_feats = self.convert_to_table(train)
-            test_feats = self.convert_to_table(test)
-            self.regression_model = RegressionModel(
-                self.model_name, train_feats, self.train_labels, test_feats)
+            sample = a.featurize(fh)
+            logging.info('Converting table...')
+            self.train_data = a.convert_to_table(sample)
+            self.feats = a._feat_order
 
-    def pass_regression_params(self):
-            self.regression_model.model_name = self.model_name
-            self.regression_model.conf = self.conf
-            if self.load_model_fn == 'false':
-                self.regression_model.feats = self._feat_order
-            if hasattr(self, 'kernel'):
-                self.regression_model.kernel = self.kernel
-            if hasattr(self, 'degree'):
-                self.regression_model.degree = self.degree
-            if self.feat_select == 'true':
-                self.regression_model.feat_select_thr =\
-                    float(self.feat_select_thr)
-            else:
-                self.regression_model.feat_select_thr = None
+    def featurize_train(self, conf):
+        self.get_train_data()
+        self.regression_model = RegressionModel(model_name=self.model_name,
+                            feat_select=self.feat_select,
+                           feat_select_thr=self.feat_select_thr,
+                           degree=self.degree, kernel=self.kernel,
+                           feats=self.feats)
+        self.regression_model.preproc_and_train(
+            self.train_data, self.train_labels)
 
-    def read_labels(self, stream, true_th=0.5):
-        labels = []
-        for l in stream:
-            f = float(l.strip().split('\t')[-1])
-            if self.binary_labels == 'true':
-                f = 0 if f < true_th else 1
-            labels.append(f)
-        return array(labels)
+    def dump_model(self):
+        fn = self.model
+        fh = open(fn, 'w')
+        cPickle.dump(self.regression_model, fh)
+ 
+class Tagger(object):
 
-    def convert_to_table(self, sample):
-        table = []
-        for s in sample:
-            table.append([0] * self._feat_i)
-            for feat, sc in s.features.iteritems():
-                if not self._feat_order:
-                    self._feat_order[feat] = 0
-                    self._feat_i = 1
-                    table[-1] = [sc]
-                elif feat not in self._feat_order:
-                    self._feat_order[feat] = self._feat_i
-                    self._feat_i += 1
-                    table[-1].append(sc)
-                else:
-                    table[-1][self._feat_order[feat]] = sc
-        return array(table)
+    def __init__(self, load_feats=True, input_=None, model='model',
+                 outputs=None, gold=None, conf=None):
+        self.load_feats = load_feats
+        self.input_fns = input_.split(',')
+        self.model = model
+        if outputs != None:
+            self.output_fns = outputs.split(',')
+        else:
+            self.output_fns = ['' for i in range(len(self.input_fns))]
+        if gold != None:
+            self.gold_fns = gold.split(',')
+        else:
+            self.gold_fns = ['' for i in range(len(self.input_fns))]
+        self.conf = conf
+    
+    def get_inputs(self):
+        if self.load_feats:
+            return [cPickle.load(open(f))['data'] for f in self.input_fns]
+        else:
+            a = Featurizer(self.conf)
+            l = []
+            for input_ in self.input_fns:
+                a = Featurizer(self.conf)
+                fh = open(input_)
+                logging.info('featurizing input {0}...'.format(input_))
+                sample = a.featurize(fh)
+                logging.info('Converting table...')
+                l.append(a.convert_to_table(sample))
+            return l    
+
+    def tag(self):
+        self.regression_model = cPickle.load(open(self.model))
+        self.inputs = self.get_inputs()
+        for i, ip in enumerate(self.inputs):
+            self.predict_and_eval(
+                ip, self.output_fns[i], self.gold_fns[i] )
+    
+    def predict_and_eval(self, ip, op, gold):
+
+        logging.info('predicting ...'.format(op))
+        predicted = self.regression_model.preproc_and_predict(ip)
+        if op != '':
+            with open(op, 'w') as f:
+                f.write('\n'.join(str(i) for i in predicted) + '\n')
+        if gold != None:        
+            with open(gold) as f:    
+                gold_labels = [float(l.strip()) for l in f]
+            
+            logging.info('correlation with {0}:{1}'.format(
+                gold, repr(pearsonr(list(predicted), gold_labels))))
+
+def train(args):
+        conf = read_config(args)
+        a = Trainer(conf, load_feats=args.load_feats, input_=args.inputs,
+                    train_labels_fn=args.gold, model=args.model,
+                    model_name=conf.get('ml', 'model_name'),
+                    feat_select=conf.get('ml', 'feat_select'),
+                    feat_select_thr=conf.get('ml', 'feat_select_thr'),
+                    degree=conf.get('ml', 'degree'),
+                    kernel=conf.get('ml', 'kernel'),
+                    C=conf.get('ml', 'C'))
+        a.featurize_train(conf)
+        a.dump_model()
+
+def tag(args):
+    conf = read_config(args)
+    a = Tagger(load_feats=args.load_feats,
+              input_=args.inputs, model=args.model,
+              outputs=args.outputs, gold=args.gold, conf=conf)
+    a.tag() 
+
+def main():
+    args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s : " +
+        "%(module)s (%(lineno)s) - %(levelname)s - %(message)s")
+
+    if args.train==True:
+        train(args)
+    elif args.tag==True:
+        tag(args)
+
+
+
+if __name__ == "__main__":
+    main()
